@@ -27,12 +27,34 @@ const httpsAgent = new https.Agent({
 const MAX_RETRIES = 3;
 const RETRY_DELAY_BASE_MS = 1000;
 
-/** 判断是否为可重试的网络错误 */
+/** 判断是否为可重试的错误（网络错误 + 飞书临时性错误码） */
 function isRetryableError(err: AxiosError): boolean {
-  if (!err.code) return false;
-  // ECONNRESET / ETIMEDOUT / ECONNREFUSED / ENOTFOUND / EPIPE 都可重试
-  const retryableCodes = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EPIPE', 'ERR_BAD_RESPONSE'];
-  return retryableCodes.includes(err.code);
+  // 网络层错误：ECONNRESET / ETIMEDOUT / ECONNREFUSED / ENOTFOUND / EPIPE 都可重试
+  if (err.code) {
+    const retryableCodes = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EPIPE', 'ERR_BAD_RESPONSE'];
+    if (retryableCodes.includes(err.code)) return true;
+  }
+  // 飞书 API 层临时性错误码也可重试
+  // 1254607: "Data not ready, please try again later" — 多维表格数据未就绪
+  const feishuCode = extractFeishuErrorCode(err);
+  const retryableFeishuCodes = [1254607, 99991672];
+  if (feishuCode && retryableFeishuCodes.includes(feishuCode)) return true;
+  return false;
+}
+
+/** 从错误的 response.data 中提取飞书错误码 */
+function extractFeishuErrorCode(err: AxiosError): number | undefined {
+  try {
+    const data = err.response?.data;
+    if (typeof data === 'object' && data !== null) {
+      return (data as any).code;
+    }
+    if (Buffer.isBuffer(data)) {
+      const json = JSON.parse(data.toString('utf-8'));
+      return json.code;
+    }
+  } catch {}
+  return undefined;
 }
 
 /** 带指数退避的重试包装 */
@@ -45,8 +67,10 @@ async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
       lastErr = err;
       if (attempt >= MAX_RETRIES) break;
       if (!isRetryableError(err as AxiosError)) break;
+      const feishuCode = extractFeishuErrorCode(err as AxiosError);
+      const reason = feishuCode ? `飞书 code=${feishuCode}` : (err.code || err.message);
       const delay = RETRY_DELAY_BASE_MS * Math.pow(2, attempt);
-      console.warn(`[feishu] ${label} 第 ${attempt + 1} 次失败 (${err.code || err.message}), ${delay}ms 后重试...`);
+      console.warn(`[feishu] ${label} 第 ${attempt + 1} 次失败 (${reason}), ${delay}ms 后重试...`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
