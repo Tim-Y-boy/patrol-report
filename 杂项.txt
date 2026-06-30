@@ -1,0 +1,6 @@
+启动命令：
+# 后端
+cd server && npm run dev    # → localhost:3001
+
+# 前端（新终端）
+cd client && npm run dev    # → localhost:5173

@@ -1,0 +1,134 @@
+{
+  "records": [
+    {
+      "id": "recuUWYESOIEN4",
+      "单位名称": "字节跳动",
+      "创建时间": "2026-04-21 17:38:03",
+      "编码": "001",
+      "创建人": [
+        {
+          "id": "ou_a539ec390974a983663d846c561d7903",
+          "name": "纪敏"
+        }
+      ],
+      "负责人": [
+        {
+          "id": "ou_bae6da79fefd3cde2b2b084eafd93693",
+          "name": "申志远"
+        }
+      ],
+      "周常汇总": [
+        {
+          "id": "recv34iyxfhTRq"
+        },
+        {
+          "id": "recv34iCnsMePl"
+        },
+        {
+          "id": "recv34iFMu9pmW"
+        },
+        {
+          "id": "recv34iINsK2U2"
+        },
+        {
+          "id": "recv34iMtxNoPm"
+        },
+        {
+          "id": "recv4JxYRLS4Yx"
+        },
+        {
+          "id": "recv5otBVOa7Eb"
+        },
+        {
+          "id": "recv63phGk3sMe"
+        },
+        {
+          "id": "recv82ckFZS7uV"
+        },
+        {
+          "id": "recv8H80rCxSNJ"
+        },
+        {
+          "id": "recvdYzu39Z83P"
+        },
+        {
+          "id": "recveDvaD6cBFe"
+        },
+        {
+          "id": "recvfiqR1bwjHo"
+        },
+        {
+          "id": "recvfiqUoWdZp8"
+        },
+        {
+          "id": "recvfiqY1r7IDW"
+        },
+        {
+          "id": "recvfir1V5wnb8"
+        },
+        {
+          "id": "recvfir59cgTxJ"
+        },
+        {
+          "id": "recvfXmutaYkke"
+        },
+        {
+          "id": "recvgCibppvySL"
+        },
+        {
+          "id": "recvgCieIgVoBM"
+        },
+        {
+          "id": "recvhhdQSW2yKk"
+        }
+      ],
+      "状态": [
+        "无效"
+      ]
+    },
+    {
+      "id": "recvhvDCKXzUvy",
+      "单位名称": "深圳太太药业有限公司",
+      "创建时间": "2026-04-22 17:11:11",
+      "编码": "002",
+      "创建人": [
+        {
+          "id": "ou_a539ec390974a983663d846c561d7903",
+          "name": "纪敏"
+        }
+      ],
+      "负责人": [
+        {
+          "id": "ou_a539ec390974a983663d846c561d7903",
+          "name": "纪敏"
+        }
+      ],
+      "周常汇总": null,
+      "状态": [
+        "有效"
+      ]
+    },
+    {
+      "id": "recvhvDFTz1ImF",
+      "单位名称": "健康药业（中国）有限公司",
+      "创建时间": "2026-04-22 17:11:24",
+      "编码": "003",
+      "创建人": [
+        {
+          "id": "ou_a539ec390974a983663d846c561d7903",
+          "name": "纪敏"
+        }
+      ],
+      "负责人": [
+        {
+          "id": "ou_a539ec390974a983663d846c561d7903",
+          "name": "纪敏"
+        }
+      ],
+      "周常汇总": null,
+      "状态": [
+        "有效"
+      ]
+    }
+  ]
+}
