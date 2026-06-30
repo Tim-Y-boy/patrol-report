@@ -5,7 +5,6 @@ import { readFile, readdir, rm, mkdir } from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { config } from '../config.js';
-import { downloadFile } from '../feishu/client.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -106,27 +105,10 @@ function detectContentType(data: Buffer, ext: string): string {
 }
 
 /**
- * 下载附件：优先飞书 REST API（应用身份），失败 99991672 则降级 lark-cli（用户身份）
+ * 下载附件：直接用 lark-cli（用户身份），REST API 对多维表格附件普遍不可用
  */
 async function downloadAttachment(fileToken: string, recordId: string): Promise<{ data: Buffer; contentType: string }> {
-  // 1. 先尝试应用身份 API（已修复的连接稳定性）
-  try {
-    console.log(`[image] REST API 开始下载 token=${fileToken.slice(0, 10)}... record=${recordId}`);
-    const result = await downloadFile(fileToken);
-    console.log(`[image] REST API 下载成功 token=${fileToken.slice(0, 10)}... size=${result.data.length}`);
-    return result;
-  } catch (err: any) {
-    const code = err.response?.data?.code;
-    const msg = err.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : err.message;
-    console.warn(`[image] REST API 下载失败 token=${fileToken.slice(0, 10)}... code=${code} msg=${msg}`);
-
-    // 99991672 = 应用无权限访问用户上传的附件，需要降级到 lark-cli
-    if (code === 99991672) {
-      console.log(`[image] 降级到 lark-cli token=${fileToken.slice(0, 10)}...`);
-      return await downloadViaLarkCli(fileToken, recordId);
-    }
-    throw err;
-  }
+  return await downloadViaLarkCli(fileToken, recordId);
 }
 
 function sendFileResponse(res: Response, data: Buffer, contentType: string, asDownload = false) {

@@ -192,6 +192,7 @@ export async function getBitableRecordsWithFields(tableId: string, params?: { pa
 
 /**
  * 下载飞书文件 (图片/附件)
+ * 返回 { data, contentType }，失败时 error 上附带 feishuCode 属性
  */
 export async function downloadFile(fileToken: string): Promise<{ data: Buffer; contentType: string }> {
   const token = await getTenantToken();
@@ -200,12 +201,12 @@ export async function downloadFile(fileToken: string): Promise<{ data: Buffer; c
       () =>
         axios({
           method: 'GET',
-          url: `${FEISHU_API_BASE}/drive/v1/files/${fileToken}/download`,
+          url: `${FEISHU_API_BASE}/drive/v1/medias/${fileToken}/download`,
           headers: {
             Authorization: `Bearer ${token}`,
           },
           responseType: 'arraybuffer',
-          timeout: 120000,          // 文件下载 120s 超时
+          timeout: 120000,
           httpAgent,
           httpsAgent,
         }),
@@ -217,11 +218,38 @@ export async function downloadFile(fileToken: string): Promise<{ data: Buffer; c
       contentType: String(res.headers['content-type'] || 'image/png'),
     };
   } catch (err: any) {
-    const detail = err.response?.data
-      ? (Buffer.isBuffer(err.response.data) ? err.response.data.toString('utf-8').slice(0, 200) : JSON.stringify(err.response.data).slice(0, 200))
-      : err.message;
-    console.error(`飞书文件下载失败 (token=${fileToken.slice(0, 10)}...):`, detail);
-    throw err;
+    // 详细日志：排查飞书返回了什么
+    const status = err.response?.status;
+    const code = err.code;
+    const headers = err.response?.headers;
+    console.error(`[downloadFile] 失败 token=${fileToken.slice(0, 10)}... status=${status} code=${code}`);
+
+    let feishuCode: number | undefined;
+    let detail = '';
+
+    if (err.response?.data) {
+      if (Buffer.isBuffer(err.response.data)) {
+        const raw = err.response.data.toString('utf-8');
+        console.error(`[downloadFile] Buffer 长度=${err.response.data.length} 前200字符=`, raw.slice(0, 200));
+        try {
+          const json = JSON.parse(raw);
+          feishuCode = json.code;
+          detail = JSON.stringify(json);
+        } catch {
+          detail = raw || '(Buffer 为空)';
+        }
+      } else {
+        detail = JSON.stringify(err.response.data);
+      }
+    } else {
+      detail = err.message || '(无 response.data 且无 message)';
+    }
+    console.error(`[downloadFile] 最终 detail=`, detail.slice(0, 300));
+
+    const enhanced = new Error(`文件下载失败: ${detail}`) as any;
+    enhanced.feishuCode = feishuCode;
+    enhanced.originalError = err;
+    throw enhanced;
   }
 }
 
