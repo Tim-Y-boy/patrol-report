@@ -46,7 +46,13 @@ export const useInspectionStore = defineStore('inspection', () => {
     try {
       const res: any = await api.get('/inspection')
       if (res.ok) {
-        records.value = res.data.records || []
+        const newRecords: AlarmRecord[] = res.data.records || []
+        // 快速指纹比对：ID 顺序 + 可变业务字段，内容未变则跳过赋值避免全量重渲染
+        const fp = (rs: AlarmRecord[]) =>
+          rs.map(r => `${r.id}|${r.复核员判定结果}|${r.AI判定结果}|${(r.AI识别结论 || '').slice(0, 40)}`).join(',')
+        if (fp(records.value) !== fp(newRecords)) {
+          records.value = newRecords
+        }
         lastFetch.value = Date.now()
         lastUpdated.value = Date.now()
       } else {

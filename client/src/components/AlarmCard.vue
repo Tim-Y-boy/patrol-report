@@ -13,10 +13,14 @@ defineProps<{
     照片: Array<{ file_token: string; name: string; record_id?: string; url?: string }>
   }
 }>()
+
+defineEmits<{
+  click: []
+}>()
 </script>
 
 <template>
-  <div class="alarm-card">
+  <div class="alarm-card" @click="$emit('click')">
     <div class="alarm-thumb">
       <AlarmImage
         v-if="record.照片?.[0]"

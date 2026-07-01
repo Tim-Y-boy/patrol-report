@@ -28,12 +28,18 @@ const MAX_CACHE = 300;
 
 let running = 0;
 const MAX_RUNNING = 8;
-const pend: Array<() => void> = [];
+const hiPend: Array<() => void> = []; // 高优先级：浏览器请求（用户正在看的）
+const loPend: Array<() => void> = []; // 低优先级：预加载（后台静默）
 function next() {
-  if (pend.length && running < MAX_RUNNING) { running++; setTimeout(pend.shift()!, 100); }
+  // 优先从高优队列取，低优队列只在无高优时放行
+  const nextFn = hiPend.shift() || loPend.shift();
+  if (nextFn && running < MAX_RUNNING) { running++; setTimeout(nextFn, 100); }
 }
-function lock(): Promise<void> {
-  return new Promise(r => { if (running < MAX_RUNNING) { running++; r(); } else { pend.push(r); } });
+function lock(priority: 'high' | 'low' = 'high'): Promise<void> {
+  return new Promise(r => {
+    if (running < MAX_RUNNING) { running++; r(); }
+    else { (priority === 'low' ? loPend : hiPend).push(r); }
+  });
 }
 function unlock() { running--; next(); }
 
@@ -184,7 +190,7 @@ export async function preloadImage(fileToken: string, recordId: string, download
 
   const shortToken = fileToken.slice(0, 10);
   try {
-    await lock();
+    await lock('low'); // 低优先级：不跟用户正在看的图片抢槽位
     // 双重检查：拿到锁后可能已被其他请求下载完成
     if (imageCache.has(fileToken)) return;
 

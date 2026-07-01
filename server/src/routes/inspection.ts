@@ -216,11 +216,26 @@ router.get('/', async (req: Request, res: Response) => {
     // ----- 全量拉取：使用缓存 + 请求去重 -----
     const cacheKey = `full_${filter || 'none'}`;
 
-    // 1. 已缓存的完成结果，直接返回
+    // 1. 已缓存的完成结果：先快速验证数据是否变更
     const cached = dataCache.get(cacheKey);
     if (cached && cached.result && Date.now() - cached.time < DATA_CACHE_TTL) {
-      console.log(`[inspection] 命中缓存 (${Math.round((Date.now() - cached.time) / 1000)}s 前)`);
-      return res.json(cached.result);
+      const age = Math.round((Date.now() - cached.time) / 1000);
+      try {
+        // 发一次 page_size=1 的极轻量请求，仅比对 total
+        const quickRes = await getBitableRecords(config.tables.inspection, { pageSize: 1, filter });
+        if (quickRes.code === 0 && quickRes.data?.total === cached.result.data.total) {
+          console.log(`[inspection] 命中缓存 (${age}s 前, total=${cached.result.data.total} 未变)`);
+          return res.json(cached.result);
+        }
+        // total 变了，清除缓存重新拉取
+        const newTotal = quickRes.data?.total;
+        console.log(`[inspection] 数据已变更 (缓存 total=${cached.result.data.total}, 飞书 total=${newTotal}), 清除缓存重新拉取`);
+        dataCache.delete(cacheKey);
+      } catch {
+        // 快速检查失败，保守起见返回缓存（飞书 API 偶发故障不应影响已加载的数据）
+        console.warn(`[inspection] 变更检查失败，降级返回缓存 (${age}s 前)`);
+        return res.json(cached.result);
+      }
     }
 
     // 2. 已有进行中的请求，等同一个 Promise（去重）
