@@ -7,6 +7,7 @@ export interface AlarmPhoto {
   name: string
   size: number
   record_id?: string
+  url?: string // 飞书返回的带 extra 鉴权的预签名下载 URL
 }
 
 export interface AlarmRecord {

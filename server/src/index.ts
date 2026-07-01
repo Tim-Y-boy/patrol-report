@@ -5,6 +5,7 @@ import inspectionRouter from './routes/inspection.js';
 import pointsRouter from './routes/points.js';
 import unitsRouter from './routes/units.js';
 import imageRouter from './routes/image.js';
+import { cleanExpiredCache, isFfmpegAvailable } from './ffmpeg.js';
 
 const app = express();
 
@@ -22,6 +23,18 @@ app.use('/api/image', imageRouter);
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
+
+// 启动时清理过期视频缓存 + 检查 FFmpeg
+(async () => {
+  await cleanExpiredCache().catch(() => {});
+  const ffAvailable = await isFfmpegAvailable().catch(() => false);
+  if (ffAvailable) {
+    console.log('🎬 FFmpeg 可用，H.265 视频将自动转码为 H.264');
+  } else {
+    console.log('⚠️  FFmpeg 未安装，视频无法在浏览器中播放（可下载后用本地播放器观看）');
+    console.log('   安装: winget install ffmpeg  或  scoop install ffmpeg');
+  }
+})();
 
 // 启动服务
 app.listen(config.port, () => {

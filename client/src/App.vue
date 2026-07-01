@@ -21,7 +21,9 @@
     <main class="app-main">
       <router-view v-slot="{ Component }">
         <transition name="fade" mode="out-in">
-          <component :is="Component" :key="$route.fullPath" />
+          <keep-alive :include="['Dashboard']">
+            <component :is="Component" :key="$route.name === 'dashboard' ? 'dashboard' : $route.fullPath" />
+          </keep-alive>
         </transition>
       </router-view>
     </main>

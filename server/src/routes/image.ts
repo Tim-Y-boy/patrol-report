@@ -4,7 +4,12 @@ import { promisify } from 'util';
 import { readFile, readdir, rm, mkdir } from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import axios from 'axios';
+import http from 'http';
+import https from 'https';
 import { config } from '../config.js';
+import { getTenantToken } from '../feishu/client.js';
+import { maybeTranscodeVideo, cleanExpiredCache, getCachedThumbnail, ensureThumbnailFromBuffer } from '../ffmpeg.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +36,49 @@ function lock(): Promise<void> {
   return new Promise(r => { if (running < MAX_RUNNING) { running++; r(); } else { pend.push(r); } });
 }
 function unlock() { running--; next(); }
+
+// ---------- REST API 下载（含 extra 参数，支持高级权限多维表格）----------
+
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 10,
+  maxFreeSockets: 5,
+  timeout: 60000,
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 10,
+  maxFreeSockets: 5,
+  timeout: 60000,
+});
+
+/**
+ * 使用 REST API 下载（利用飞书返回的带 extra 鉴权的 URL）
+ * 适用于开启了高级权限的多维表格
+ */
+async function downloadViaRestApi(downloadUrl: string, fileToken: string): Promise<{ data: Buffer; contentType: string }> {
+  const token = await getTenantToken();
+  const shortToken = fileToken.slice(0, 10);
+  console.log(`[image] REST API 下载 token=${shortToken}... (含 extra 参数)`);
+
+  const res = await axios({
+    method: 'GET',
+    url: downloadUrl,
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    httpAgent,
+    httpsAgent,
+  });
+
+  const data = Buffer.from(res.data);
+  const contentType = String(res.headers['content-type'] || 'application/octet-stream');
+  console.log(`[image] REST API 下载成功 token=${shortToken}... size=${data.length} type=${contentType}`);
+  return { data, contentType };
+}
 
 /**
  * 尝试使用 lark-cli 下载（以用户身份，绕过应用权限限制）
@@ -105,9 +153,22 @@ function detectContentType(data: Buffer, ext: string): string {
 }
 
 /**
- * 下载附件：直接用 lark-cli（用户身份），REST API 对多维表格附件普遍不可用
+ * 下载附件：优先使用带 extra 参数的 REST API URL，不可用时回退到 lark-cli
  */
-async function downloadAttachment(fileToken: string, recordId: string): Promise<{ data: Buffer; contentType: string }> {
+async function downloadAttachment(fileToken: string, recordId: string, downloadUrl?: string): Promise<{ data: Buffer; contentType: string }> {
+  // 1. 优先使用飞书返回的预签名 URL（含 extra 鉴权，支持高级权限表格）
+  if (downloadUrl) {
+    try {
+      return await downloadViaRestApi(downloadUrl, fileToken);
+    } catch (err: any) {
+      const feishuCode = err.response?.data ? (() => {
+        try { return JSON.parse(Buffer.isBuffer(err.response.data) ? err.response.data.toString('utf-8') : '').code; } catch { return undefined; }
+      })() : undefined;
+      console.warn(`[image] REST API 失败 (code=${feishuCode}, status=${err.response?.status}), 回退到 lark-cli...`);
+    }
+  }
+
+  // 2. 回退：lark-cli（用户身份）
   return await downloadViaLarkCli(fileToken, recordId);
 }
 
@@ -139,14 +200,37 @@ function sendFileResponse(res: Response, data: Buffer, contentType: string, asDo
   }
 }
 
+// 缩略图路由（必须在 /:fileToken 之前，否则 "thumb" 会被当成 fileToken）
+router.get('/thumb/:fileToken', async (req: Request, res: Response) => {
+  try {
+    const data = await getCachedThumbnail(req.params.fileToken);
+    if (data) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(data);
+    }
+    // 缩略图尚未生成：禁止浏览器缓存 204，以便下次重新请求
+    res.setHeader('Cache-Control', 'no-cache, max-age=0');
+    res.status(204).end();
+  } catch {
+    res.setHeader('Cache-Control', 'no-cache, max-age=0');
+    res.status(204).end();
+  }
+});
+
 router.get('/:fileToken', async (req: Request, res: Response) => {
   const { fileToken } = req.params;
   const recordId = req.query.record_id as string;
+  const downloadUrl = req.query.url as string | undefined;
   const isRetry = req.query.retry === '1';
   const asDownload = req.query.download === '1';
 
   const cached = imageCache.get(fileToken);
   if (cached) {
+    // 内存缓存命中时，如果视频还没缩略图，异步补生成（不影响本次响应）
+    if (!asDownload && cached.contentType.startsWith('video/')) {
+      ensureThumbnailFromBuffer(fileToken, cached.data).catch(() => {});
+    }
     return sendFileResponse(res, cached.data, cached.contentType, asDownload);
   }
 
@@ -169,7 +253,21 @@ router.get('/:fileToken', async (req: Request, res: Response) => {
     await lock();
     if (isRetry) FAILED.delete(fileToken);
 
-    const { data, contentType } = await downloadAttachment(fileToken, recordId);
+    const { data: rawData, contentType: rawContentType } = await downloadAttachment(fileToken, recordId, downloadUrl);
+
+    // 视频播放时检测 H.265 → H.264 转码（下载走原始文件，不转码）
+    let data = rawData;
+    let contentType = rawContentType;
+    if (!asDownload && rawContentType.startsWith('video/')) {
+      try {
+        const result = await maybeTranscodeVideo(fileToken, rawData, rawContentType);
+        data = result.data;
+        contentType = result.contentType;
+      } catch (err: any) {
+        console.warn(`[image] 转码失败，返回原始视频: ${err.message?.slice(0, 100)}`);
+        // 转码失败时返回原始数据，浏览器可能无法播放但下载按钮仍然可用
+      }
+    }
 
     if (imageCache.size >= MAX_CACHE) {
       const k = imageCache.keys().next().value;
@@ -177,6 +275,8 @@ router.get('/:fileToken', async (req: Request, res: Response) => {
     }
     imageCache.set(fileToken, { data, contentType });
 
+    const isVideoType = contentType.startsWith('video/');
+    console.log(`[image] 响应 token=${fileToken.slice(0, 10)}... type=${contentType} size=${data.length} download=${asDownload} video=${isVideoType} range=${req.headers.range || 'none'}`);
     sendFileResponse(res, data, contentType, asDownload);
   } catch (err: any) {
     const msg = err.stderr?.slice(0, 300) || err.message?.slice(0, 300);

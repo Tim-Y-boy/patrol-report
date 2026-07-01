@@ -134,6 +134,7 @@ onBeforeRouteUpdate((to) => {
               <AlarmImage
                 :file-token="currentImage.file_token"
                 :record-id="currentImage.record_id"
+                :url="currentImage.url"
                 :alt="currentImage.name"
                 class="main-image-wrapper"
               />
@@ -151,7 +152,7 @@ onBeforeRouteUpdate((to) => {
               :class="{ active: idx === activeImageIndex }"
               @click="activeImageIndex = idx"
             >
-              <AlarmImage :file-token="photo.file_token" :record-id="photo.record_id" :alt="photo.name" aspect-ratio="1/1" />
+              <AlarmImage :file-token="photo.file_token" :record-id="photo.record_id" :url="photo.url" :alt="photo.name" aspect-ratio="1/1" />
             </div>
           </div>
         </div>
@@ -195,6 +196,7 @@ onBeforeRouteUpdate((to) => {
                 v-if="r.照片?.[0]"
                 :file-token="r.照片[0].file_token"
                 :record-id="r.照片[0].record_id"
+                :url="r.照片[0].url"
                 :alt="r.照片[0].name"
                 aspect-ratio="4/3"
               />

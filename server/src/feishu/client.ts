@@ -89,7 +89,7 @@ let cachedToken: TenantToken | null = null;
 /**
  * 获取 tenant_access_token (带缓存)
  */
-async function getTenantToken(): Promise<string> {
+export async function getTenantToken(): Promise<string> {
   if (cachedToken && Date.now() < cachedToken.expireAt - 60000) {
     return cachedToken.token;
   }

@@ -10,7 +10,7 @@ defineProps<{
     监控要点: string
     AI判定结果: string
     复核员判定结果: string
-    照片: Array<{ file_token: string; name: string; record_id?: string }>
+    照片: Array<{ file_token: string; name: string; record_id?: string; url?: string }>
   }
 }>()
 </script>
@@ -22,6 +22,7 @@ defineProps<{
         v-if="record.照片?.[0]"
         :file-token="record.照片[0].file_token"
         :record-id="record.照片[0].record_id"
+        :url="record.照片[0].url"
         :alt="record.照片[0].name"
         aspect-ratio="4/3"
       />

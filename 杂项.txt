@@ -4,3 +4,22 @@ cd server && npm run dev    # → localhost:3001
 
 # 前端（新终端）
 cd client && npm run dev    # → localhost:5173
+
+
+没有 PM2 配置文件，直接给命令：
+
+开发模式（两个终端）：
+
+
+# 终端1 — 后端（端口 3001）
+cd d:\patrol-report\server && npm run dev
+
+# 终端2 — 前端（端口 5173）
+cd d:\patrol-report\client && npm run dev
+PM2 保活（断开远程连接后不停止，Windows 必须加 cmd.exe /c）：
+
+
+pm2 start "cmd.exe /c npm run dev" --name patrol-server --cwd d:\patrol-report\server
+pm2 start "cmd.exe /c npm run dev" --name patrol-client --cwd d:\patrol-report\client
+pm2 save
+访问地址：http://192.168.0.117:5173

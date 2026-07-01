@@ -4,6 +4,15 @@ import { config } from '../config.js';
 
 const router = Router();
 
+// ---------- 全量数据缓存（避免并发请求重复扫描飞书 API） ----------
+interface CacheEntry {
+  promise: Promise<any>;   // 正在进行的请求 Promise（用于去重）
+  result: any;             // 完成后替换为结果
+  time: number;            // 缓存时间戳
+}
+const dataCache = new Map<string, CacheEntry>();
+const DATA_CACHE_TTL = 30 * 1000; // 全量数据缓存 30 秒
+
 // 缓存字段选项 ID → 显示文本映射
 let optionMapCache: Map<string, Map<string, string>> | null = null;
 let optionMapCacheTime = 0;
@@ -121,6 +130,33 @@ function safeText(val: any, fieldName?: string, optionMap?: Map<string, Map<stri
   return String(val);
 }
 
+// 将 raw records 转为前端友好格式
+function formatRecords(records: any[], optionMap: Map<string, Map<string, string>>) {
+  return records.map((r: any) => ({
+    id: r.record_id,
+    记录编号: safeText(r['记录编号'], '记录编号', optionMap),
+    创建时间: fmtTime(r['创建时间']),
+    创建人: safeUserNames(r['创建人']),
+    巡检点位: safeText(r['巡检点位'], '巡检点位', optionMap),
+    监控要点: safeText(r['监控要点'], '监控要点', optionMap),
+    AI识别结论: safeText(r['AI 识别结论'], 'AI 识别结论', optionMap),
+    巡检单位: r['巡检单位'] || [],
+    点位: safeText(r['点位'], '点位', optionMap),
+    巡检规则: r['巡检规则'] || [],
+    复核人员: safeText(r['复核人员'], '复核人员', optionMap),
+    AI判定结果: safeText(r['AI 判定结果'], 'AI 判定结果', optionMap),
+    复核员判定结果: safeText(r['复核员判定结果'], '复核员判定结果', optionMap),
+    周常汇总: r['周常汇总'] || [],
+    照片: (r['照片'] as any[])?.map((p: any) => ({
+      file_token: p.file_token,
+      name: p.name,
+      size: p.size,
+      record_id: r.record_id,
+      url: p.url || '',
+    })) || [],
+  }));
+}
+
 /**
  * GET /api/inspection
  * 获取巡检记录列表
@@ -130,20 +166,14 @@ function safeText(val: any, fieldName?: string, optionMap?: Map<string, Map<stri
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    // 预加载字段选项映射，用于将 option ID 转为可读文本
     const optionMap = await getOptionMap();
 
     const reqPage = parseInt(req.query.page as string) || 0;
     const reqPageSize = parseInt(req.query.pageSize as string) || 0;
     const filter = req.query.filter as string | undefined;
-    const FETCH_PAGE_SIZE = 30; // 每次 API 调用拉 30 条，避免单次响应过大导致 ECONNRESET
 
-    let allItems: any[] = [];
-    let total = 0;
-    let hasMore = false;
-
+    // 带分页参数的请求不走缓存（用户主动翻页/筛选，每次独立请求）
     if (reqPage > 0 && reqPageSize > 0) {
-      // ----- 客户端指定了分页：仅拉一页 -----
       const result = await getBitableRecords(config.tables.inspection, {
         pageSize: reqPageSize,
         filter,
@@ -152,13 +182,56 @@ router.get('/', async (req: Request, res: Response) => {
       if (result.code !== 0) {
         return res.status(500).json({ ok: false, error: result.msg });
       }
-      allItems = result.data?.items || [];
-      total = result.data?.total || allItems.length;
-      hasMore = result.data?.has_more || false;
-    } else {
-      // ----- 未指定分页：分页循环拉全量 -----
+
+      const records = (result.data?.items || []).map((item: any) => ({
+        ...item.fields,
+        record_id: item.record_id,
+      }));
+
+      const formatted = formatRecords(records, optionMap);
+
+      return res.json({
+        ok: true,
+        data: {
+          records: formatted,
+          total: result.data?.total || formatted.length,
+          hasMore: result.data?.has_more || false,
+        },
+      });
+    }
+
+    // ----- 全量拉取：使用缓存 + 请求去重 -----
+    const cacheKey = `full_${filter || 'none'}`;
+
+    // 1. 已缓存的完成结果，直接返回
+    const cached = dataCache.get(cacheKey);
+    if (cached && cached.result && Date.now() - cached.time < DATA_CACHE_TTL) {
+      console.log(`[inspection] 命中缓存 (${Math.round((Date.now() - cached.time) / 1000)}s 前)`);
+      return res.json(cached.result);
+    }
+
+    // 2. 已有进行中的请求，等同一个 Promise（去重）
+    if (cached && cached.promise) {
+      console.log(`[inspection] 复用进行中的请求，等待完成...`);
+      try {
+        const result = await cached.promise;
+        return res.json(result);
+      } catch (err: any) {
+        return res.status(500).json({ ok: false, error: err.message });
+      }
+    }
+
+    // 3. 首次请求：发起全量扫描
+    console.log(`[inspection] 开始全量拉取 (filter=${filter || 'none'})`);
+
+    const fetchPromise = (async () => {
+      const FETCH_PAGE_SIZE = 30;
+      const allItems: any[] = [];
+      let total = 0;
+      let hasMore = false;
       let pageToken: string | undefined;
       let pageCount = 0;
+
       do {
         pageCount++;
         const result = await getBitableRecords(config.tables.inspection, {
@@ -168,7 +241,7 @@ router.get('/', async (req: Request, res: Response) => {
         });
 
         if (result.code !== 0) {
-          return res.status(500).json({ ok: false, error: result.msg });
+          throw new Error(result.msg || `飞书 API 返回错误 code=${result.code}`);
         }
 
         const items = result.data?.items || [];
@@ -179,53 +252,45 @@ router.get('/', async (req: Request, res: Response) => {
 
         console.log(`[inspection] 第 ${pageCount} 页拉取完成 (${items.length} 条, 累计 ${allItems.length}/${total})`);
       } while (hasMore && pageToken);
+
+      const records = allItems.map((item: any) => ({
+        ...item.fields,
+        record_id: item.record_id,
+      }));
+
+      // 打印首条记录用于排查
+      if (records.length > 0) {
+        console.log('[inspection] 首条记录 raw fields keys:', Object.keys(records[0]).filter(k => !k.startsWith('_')).slice(0, 20));
+        console.log('[inspection] 首条记录 监控要点 raw:', JSON.stringify(records[0]['监控要点']));
+        console.log('[inspection] 首条记录 复核人员 raw:', JSON.stringify(records[0]['复核人员']));
+        console.log('[inspection] 首条记录 巡检点位 raw:', JSON.stringify(records[0]['巡检点位']));
+      }
+
+      const formatted = formatRecords(records, optionMap);
+
+      return {
+        ok: true,
+        data: {
+          records: formatted,
+          total: total || formatted.length,
+          hasMore,
+        },
+      };
+    })();
+
+    // 存入 cache（先存 promise，完成后替换为 result）
+    dataCache.set(cacheKey, { promise: fetchPromise, result: null, time: Date.now() });
+
+    try {
+      const result = await fetchPromise;
+      // 完成后替换缓存为 result
+      dataCache.set(cacheKey, { promise: null as any, result, time: Date.now() });
+      return res.json(result);
+    } catch (err: any) {
+      dataCache.delete(cacheKey); // 失败了清除缓存，下次重试
+      console.error('巡检记录查询失败:', err.message);
+      return res.status(500).json({ ok: false, error: err.message });
     }
-
-    const records = allItems.map((item: any) => ({
-      ...item.fields,
-      record_id: item.record_id,
-    }));
-
-    // 打印首条记录的原始"监控要点"/"复核人员"字段值，用于排查飞书数据格式
-    if (records.length > 0) {
-      console.log('[inspection] 首条记录 raw fields keys:', Object.keys(records[0]).filter(k => !k.startsWith('_')).slice(0, 20));
-      console.log('[inspection] 首条记录 监控要点 raw:', JSON.stringify(records[0]['监控要点']));
-      console.log('[inspection] 首条记录 复核人员 raw:', JSON.stringify(records[0]['复核人员']));
-      console.log('[inspection] 首条记录 巡检点位 raw:', JSON.stringify(records[0]['巡检点位']));
-    }
-
-    // 简化为前端友好的格式
-    const formatted = records.map((r: any) => ({
-      id: r.record_id,
-      记录编号: safeText(r['记录编号'], '记录编号', optionMap),
-      创建时间: fmtTime(r['创建时间']),
-      创建人: safeUserNames(r['创建人']),
-      巡检点位: safeText(r['巡检点位'], '巡检点位', optionMap),
-      监控要点: safeText(r['监控要点'], '监控要点', optionMap),
-      AI识别结论: safeText(r['AI 识别结论'], 'AI 识别结论', optionMap),
-      巡检单位: r['巡检单位'] || [],
-      点位: safeText(r['点位'], '点位', optionMap),
-      巡检规则: r['巡检规则'] || [],
-      复核人员: safeText(r['复核人员'], '复核人员', optionMap),
-      AI判定结果: safeText(r['AI 判定结果'], 'AI 判定结果', optionMap),
-      复核员判定结果: safeText(r['复核员判定结果'], '复核员判定结果', optionMap),
-      周常汇总: r['周常汇总'] || [],
-      照片: (r['照片'] as any[])?.map((p: any) => ({
-        file_token: p.file_token,
-        name: p.name,
-        size: p.size,
-        record_id: r.record_id,
-      })) || [],
-    }));
-
-    return res.json({
-      ok: true,
-      data: {
-        records: formatted,
-        total: total || formatted.length,
-        hasMore,
-      },
-    });
   } catch (err: any) {
     console.error('巡检记录查询失败:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
@@ -247,33 +312,14 @@ router.get('/:recordId', async (req: Request, res: Response) => {
       return res.status(result.code === 91403 ? 404 : 500).json({ ok: false, error: result.msg });
     }
 
-    const r = result.data?.record;
-    if (!r) {
+    const rec = result.data?.record;
+    if (!rec) {
       return res.status(404).json({ ok: false, error: '记录不存在' });
     }
 
-    const record = {
-      id: r.record_id,
-      记录编号: safeText(r.fields['记录编号'], '记录编号', optionMap),
-      创建时间: fmtTime(r.fields['创建时间']),
-      创建人: safeUserNames(r.fields['创建人']),
-      巡检点位: safeText(r.fields['巡检点位'], '巡检点位', optionMap),
-      监控要点: safeText(r.fields['监控要点'], '监控要点', optionMap),
-      AI识别结论: safeText(r.fields['AI 识别结论'], 'AI 识别结论', optionMap),
-      巡检单位: r.fields['巡检单位'] || [],
-      点位: safeText(r.fields['点位'], '点位', optionMap),
-      巡检规则: r.fields['巡检规则'] || [],
-      复核人员: safeText(r.fields['复核人员'], '复核人员', optionMap),
-      AI判定结果: safeText(r.fields['AI 判定结果'], 'AI 判定结果', optionMap),
-      复核员判定结果: safeText(r.fields['复核员判定结果'], '复核员判定结果', optionMap),
-      周常汇总: r.fields['周常汇总'] || [],
-      照片: (r.fields['照片'] as any[])?.map((p: any) => ({
-        file_token: p.file_token,
-        name: p.name,
-        size: p.size,
-        record_id: r.record_id,
-      })) || [],
-    };
+    // 复用 formatRecords
+    const rawRecord = { ...rec.fields, record_id: rec.record_id };
+    const [record] = formatRecords([rawRecord], optionMap);
 
     return res.json({ ok: true, data: record });
   } catch (err: any) {
