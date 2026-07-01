@@ -27,10 +27,10 @@ const FAILED_TTL = 120000;
 const MAX_CACHE = 300;
 
 let running = 0;
-const MAX_RUNNING = 4;
+const MAX_RUNNING = 8;
 const pend: Array<() => void> = [];
 function next() {
-  if (pend.length && running < MAX_RUNNING) { running++; setTimeout(pend.shift()!, 600); }
+  if (pend.length && running < MAX_RUNNING) { running++; setTimeout(pend.shift()!, 100); }
 }
 function lock(): Promise<void> {
   return new Promise(r => { if (running < MAX_RUNNING) { running++; r(); } else { pend.push(r); } });
@@ -172,6 +172,37 @@ async function downloadAttachment(fileToken: string, recordId: string, downloadU
   return await downloadViaLarkCli(fileToken, recordId);
 }
 
+/**
+ * 预加载图片/视频到内存缓存（后台调用，不阻塞响应）
+ * 已在缓存中或正在下载中的会跳过，失败静默处理
+ */
+export async function preloadImage(fileToken: string, recordId: string, downloadUrl?: string): Promise<void> {
+  // 已在缓存中，跳过
+  if (imageCache.has(fileToken)) return;
+  // 无有效下载方式，跳过
+  if (!downloadUrl && !recordId) return;
+
+  const shortToken = fileToken.slice(0, 10);
+  try {
+    await lock();
+    // 双重检查：拿到锁后可能已被其他请求下载完成
+    if (imageCache.has(fileToken)) return;
+
+    const { data, contentType } = await downloadAttachment(fileToken, recordId, downloadUrl);
+
+    if (imageCache.size >= MAX_CACHE) {
+      const k = imageCache.keys().next().value;
+      if (k) imageCache.delete(k);
+    }
+    imageCache.set(fileToken, { data, contentType });
+    console.log(`[image] 预加载完成 token=${shortToken}... size=${data.length} type=${contentType}`);
+  } catch (err: any) {
+    console.warn(`[image] 预加载失败 token=${shortToken}...: ${err.message?.slice(0, 100)}`);
+  } finally {
+    unlock();
+  }
+}
+
 function sendFileResponse(res: Response, data: Buffer, contentType: string, asDownload = false) {
   const disposition = asDownload ? 'attachment' : 'inline';
   const range = res.req.headers.range;
@@ -224,6 +255,13 @@ router.get('/:fileToken', async (req: Request, res: Response) => {
   const downloadUrl = req.query.url as string | undefined;
   const isRetry = req.query.retry === '1';
   const asDownload = req.query.download === '1';
+
+  // 重试时清除缓存，强制重新下载+转码
+  if (isRetry) {
+    imageCache.delete(fileToken);
+    FAILED.delete(fileToken);
+    console.log(`[image] 重试模式：清除缓存 token=${fileToken.slice(0, 10)}...`);
+  }
 
   const cached = imageCache.get(fileToken);
   if (cached) {

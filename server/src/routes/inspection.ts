@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { getBitableRecords, getBitableRecord, getFieldList } from '../feishu/client.js';
 import { config } from '../config.js';
+import { preloadImage } from './image.js';
 
 const router = Router();
 
@@ -11,7 +12,7 @@ interface CacheEntry {
   time: number;            // 缓存时间戳
 }
 const dataCache = new Map<string, CacheEntry>();
-const DATA_CACHE_TTL = 30 * 1000; // 全量数据缓存 30 秒
+const DATA_CACHE_TTL = 120 * 1000; // 全量数据缓存 2 分钟（减少飞书全量扫描频率）
 
 // 缓存字段选项 ID → 显示文本映射
 let optionMapCache: Map<string, Map<string, string>> | null = null;
@@ -157,6 +158,17 @@ function formatRecords(records: any[], optionMap: Map<string, Map<string, string
   }));
 }
 
+/** 后台预加载所有照片到 imageCache（跳过视频：视频需转码，不适合预加载） */
+function preloadAllPhotos(records: ReturnType<typeof formatRecords>) {
+  const VIDEO_EXT = /\.(mp4|mov|webm|avi|mkv|flv|wmv|m4v|3gp)$/i;
+  for (const r of records) {
+    for (const p of (r.照片 as any[]) || []) {
+      if (p.name && VIDEO_EXT.test(p.name)) continue; // 视频需转码，走按需下载路径
+      preloadImage(p.file_token, p.record_id || '', p.url || '').catch(() => {});
+    }
+  }
+}
+
 /**
  * GET /api/inspection
  * 获取巡检记录列表
@@ -189,6 +201,7 @@ router.get('/', async (req: Request, res: Response) => {
       }));
 
       const formatted = formatRecords(records, optionMap);
+      preloadAllPhotos(formatted); // 后台预加载照片
 
       return res.json({
         ok: true,
@@ -221,39 +234,75 @@ router.get('/', async (req: Request, res: Response) => {
       }
     }
 
-    // 3. 首次请求：发起全量扫描
+    // 3. 首次请求：发起全量扫描（带完整性校验和重试）
     console.log(`[inspection] 开始全量拉取 (filter=${filter || 'none'})`);
 
     const fetchPromise = (async () => {
       const FETCH_PAGE_SIZE = 30;
-      const allItems: any[] = [];
-      let total = 0;
-      let hasMore = false;
-      let pageToken: string | undefined;
-      let pageCount = 0;
+      const MAX_PAGES = 20; // 安全阀：最多 20 页（600 条）
+      const MAX_SCAN_RETRIES = 2; // 数据不完整时重试整个扫描的次数
 
-      do {
-        pageCount++;
-        const result = await getBitableRecords(config.tables.inspection, {
-          pageSize: FETCH_PAGE_SIZE,
-          pageToken,
-          filter,
-        });
+      /** 执行一轮完整的分页扫描 */
+      async function doFullScan(): Promise<{ items: any[]; total: number }> {
+        const allItems: any[] = [];
+        let total = 0;
+        let hasMore = false;
+        let pageToken: string | undefined;
+        let pageCount = 0;
 
-        if (result.code !== 0) {
-          throw new Error(result.msg || `飞书 API 返回错误 code=${result.code}`);
+        do {
+          pageCount++;
+          const result = await getBitableRecords(config.tables.inspection, {
+            pageSize: FETCH_PAGE_SIZE,
+            pageToken,
+            filter,
+          });
+
+          if (result.code !== 0) {
+            throw new Error(result.msg || `飞书 API 返回错误 code=${result.code}`);
+          }
+
+          const items = result.data?.items || [];
+          allItems.push(...items);
+          total = result.data?.total || 0;
+          hasMore = result.data?.has_more || false;
+          pageToken = result.data?.page_token;
+
+          console.log(`[inspection] 第 ${pageCount} 页 (${items.length} 条, 累计 ${allItems.length}/${total}, hasMore=${hasMore}, hasToken=${!!pageToken})`);
+
+          // 安全阀：防止死循环
+          if (pageCount >= MAX_PAGES) {
+            console.warn(`[inspection] 已达最大页数限制 (${MAX_PAGES} 页)，停止拉取`);
+            break;
+          }
+        } while (hasMore && pageToken);
+
+        return { items: allItems, total };
+      }
+
+      // 带完整性校验的重试循环
+      let scanItems: any[] = [];
+      let scanTotal = 0;
+      for (let attempt = 0; attempt <= MAX_SCAN_RETRIES; attempt++) {
+        const { items, total } = await doFullScan();
+        scanItems = items;
+        scanTotal = total;
+
+        if (scanItems.length >= scanTotal) {
+          // 完整：实际拉取数 >= total
+          console.log(`[inspection] 扫描完成：${scanItems.length}/${scanTotal} 条（完整）`);
+          break;
         }
 
-        const items = result.data?.items || [];
-        allItems.push(...items);
-        total = result.data?.total || 0;
-        hasMore = result.data?.has_more || false;
-        pageToken = result.data?.page_token;
+        if (attempt < MAX_SCAN_RETRIES) {
+          console.warn(`[inspection] 数据不完整：实际 ${scanItems.length} 条, API total=${scanTotal}, 差 ${scanTotal - scanItems.length} 条。${500}ms 后重试整轮扫描...`);
+          await new Promise(r => setTimeout(r, 500));
+        } else {
+          console.warn(`[inspection] ${MAX_SCAN_RETRIES} 次重试后仍不完整：实际 ${scanItems.length} 条, API total=${scanTotal}，以实际拉取数为准`);
+        }
+      }
 
-        console.log(`[inspection] 第 ${pageCount} 页拉取完成 (${items.length} 条, 累计 ${allItems.length}/${total})`);
-      } while (hasMore && pageToken);
-
-      const records = allItems.map((item: any) => ({
+      const records = scanItems.map((item: any) => ({
         ...item.fields,
         record_id: item.record_id,
       }));
@@ -261,19 +310,17 @@ router.get('/', async (req: Request, res: Response) => {
       // 打印首条记录用于排查
       if (records.length > 0) {
         console.log('[inspection] 首条记录 raw fields keys:', Object.keys(records[0]).filter(k => !k.startsWith('_')).slice(0, 20));
-        console.log('[inspection] 首条记录 监控要点 raw:', JSON.stringify(records[0]['监控要点']));
-        console.log('[inspection] 首条记录 复核人员 raw:', JSON.stringify(records[0]['复核人员']));
-        console.log('[inspection] 首条记录 巡检点位 raw:', JSON.stringify(records[0]['巡检点位']));
       }
 
       const formatted = formatRecords(records, optionMap);
+      preloadAllPhotos(formatted); // 后台预加载所有照片
 
       return {
         ok: true,
         data: {
           records: formatted,
-          total: total || formatted.length,
-          hasMore,
+          total: scanTotal || formatted.length,
+          hasMore: false,
         },
       };
     })();

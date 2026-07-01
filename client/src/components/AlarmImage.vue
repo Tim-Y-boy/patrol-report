@@ -15,10 +15,14 @@ const props = withDefaults(defineProps<{
 const VIDEO_EXTENSIONS = /\.(mp4|mov|webm|avi|mkv|flv|wmv|m4v|3gp)$/i
 const isVideo = computed(() => VIDEO_EXTENSIONS.test(props.alt || ''))
 
+// 视频重试计数器（递增触发 URL 变化，带 retry=1 通知服务端清除缓存）
+const videoRetryKey = ref(0)
+
 // 视频播放 URL（inline，支持 Range 拖拽进度条）
-const videoUrl = computed(() =>
-  `/api/image/${props.fileToken}?record_id=${props.recordId || ''}&url=${encodeURIComponent(props.url || '')}`
-)
+const videoUrl = computed(() => {
+  const base = `/api/image/${props.fileToken}?record_id=${props.recordId || ''}&url=${encodeURIComponent(props.url || '')}`
+  return videoRetryKey.value > 0 ? `${base}&retry=1&_t=${videoRetryKey.value}` : base
+})
 
 // 视频下载 URL（强制下载）
 const downloadUrl = computed(() =>
@@ -71,7 +75,7 @@ function retryVideo() {
   hasStartedPlaying.value = false
   showPlayButton.value = true
   videoErrMsg.value = ''
-  videoRef.value?.load()
+  videoRetryKey.value++ // 触发 URL 变化 + retry=1 通知服务端清除缓存重新转码
 }
 
 // 图片逻辑
